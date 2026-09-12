@@ -1,0 +1,78 @@
+name: Build AethexFlow Player Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'player-ci-source.zip'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Player source
+        shell: powershell
+        run: |
+          if (Test-Path src) { Remove-Item src -Recurse -Force }
+          Expand-Archive -Path player-ci-source.zip -DestinationPath src -Force
+          Get-ChildItem src
+
+      - name: Build offline Setup.exe
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          Set-Location src
+          .\BUILD-FINAL-INNO.ps1
+
+      - name: Verify installer output
+        shell: powershell
+        run: |
+          $setup = Join-Path $PWD 'src\release\AethexFlow-Player-Setup.exe'
+          if (!(Test-Path $setup)) { throw 'Setup.exe was not produced.' }
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Setup SHA256: $hash"
+
+      - name: Silent install test
+        shell: powershell
+        run: |
+          $setup = Join-Path $PWD 'src\release\AethexFlow-Player-Setup.exe'
+          $log = Join-Path $PWD 'src\release\INSTALL-TEST.log'
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=$log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installer exit code: $($p.ExitCode)" }
+          $exe = 'C:\Program Files\AethexFlow Player\aethexflow-player.exe'
+          if (!(Test-Path $exe)) { throw 'Installed app executable missing.' }
+          Write-Host 'Installer execution verified.'
+
+      - name: Launch smoke test
+        shell: powershell
+        run: |
+          $exe = 'C:\Program Files\AethexFlow Player\aethexflow-player.exe'
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) {
+            if ($p.ExitCode -ne 0) { throw "App exited during launch smoke test with code $($p.ExitCode)" }
+            Write-Host 'App opened and exited cleanly.'
+          } else {
+            Write-Host 'App remained running after launch smoke window.'
+            Stop-Process -Id $p.Id -Force
+          }
+
+      - name: Upload Windows installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AethexFlow-Player-Windows-Installer
+          path: |
+            src/release/AethexFlow-Player-Setup.exe
+            src/release/SHA256SUMS.txt
+            src/release/BUILD-STATUS.txt
+            src/release/INSTALL-TEST.log
+          if-no-files-found: warn
+          retention-days: 7
